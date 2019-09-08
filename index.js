@@ -5,10 +5,9 @@ const {
   BasicCard,
   SimpleResponse,
   Suggestions,
-  Image,
   Button,
-  Table,
-  SignIn
+  SignIn,
+  UpdatePermission
 } = require('actions-on-google');
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
@@ -19,7 +18,10 @@ const db = admin.firestore();
 const {
   DateTime
 } = require('luxon');
-
+const _ = require('lodash');
+const cors = require('cors')({
+  origin: true,
+});
 const intentSuggestions = [
   'Grocery',
   'Food',
@@ -29,6 +31,14 @@ const intentSuggestions = [
   'Clothes',
   'Education',
   'Last Month Expense'
+];
+
+const filterSuggestions = intentSuggestions.filter((intent) =>{
+  return intent!=="Mobile" && intent!=="Internet"
+})
+
+const pushNotificationSuggesion = [
+  'Notify Me Every Week'
 ];
 
 app.intent('Default Welcome Intent', (conv) => {
@@ -75,9 +85,29 @@ app.intent('ask_for_sign_in_confirmation', (conv, params, signin) => {
   }
 })
 
+app.intent('setup_push', (conv) => {
+  conv.ask(new UpdatePermission({intent: 'NMonthsExpense'}));
+});
+
+app.intent('finish_push_setup', async (conv) => {
+  if (conv.arguments.get('PERMISSION')) {
+    const userID = conv.arguments.get('UPDATES_USER_ID');
+    console.log(conv.arguments);
+    if(userID){
+      const email = conv.user.email
+      await db.collection("Expenses").doc(email).collection("Token").set({userID});
+    }
+    conv.close(`Ok, I'll start alerting you.`);
+  }
+  else{
+    conv.close(`Ok, I won't alert you.`);
+  }
+});
+
 app.intent('NMonthsExpense', async (conv, params) => {
   const email = conv.user.email
   const period = params[`date-period`];
+  const date = params[`date`];
   if(period){
       const {startDate, endDate} = period;
       const dbResults = await db.collection("Expenses").doc(email).collection("Expense").where("date", ">=", new Date(startDate)).where("date", "<=", new Date(endDate)).get();
@@ -92,8 +122,32 @@ app.intent('NMonthsExpense', async (conv, params) => {
       conv.ask(new BasicCard({
         text: `Your total expense for requested period is ***${amount}***`, // Note the two spaces before '\n' required for
         title: 'Expense Report',
+        buttons: new Button({
+          title: 'See Full Report',
+          url: 'https://boteverywhere-ff53e.firebaseapp.com/',
+        }),
       }))
-      conv.ask(new Suggestions(intentSuggestions));
+      conv.ask(new Suggestions([...filterSuggestions,...pushNotificationSuggesion]));
+  }
+  else if (date){
+    const dbResults = await db.collection("Expenses").doc(email).collection("Expense").where("date", ">=", new Date(date)).where("date", "<=", new Date(date)).get();
+    let amount = 0;
+      dbResults.forEach((doc) =>{
+        amount = amount + parseFloat(doc.data().amount);
+      })
+      conv.ask(new SimpleResponse({
+        speech: `Please find your expense`,
+        text: `Please find your expense`,
+      }));
+      conv.ask(new BasicCard({
+        text: `Your total expense for requested period is ***${amount}***`, // Note the two spaces before '\n' required for
+        title: 'Expense Report',
+        buttons: new Button({
+          title: 'See Full Report',
+          url: 'https://boteverywhere-ff53e.firebaseapp.com/',
+        }),
+      }))
+      conv.ask(new Suggestions([...filterSuggestions,...pushNotificationSuggesion]));
   }
   else{
     conv.ask(new SimpleResponse({
@@ -106,3 +160,23 @@ app.intent('NMonthsExpense', async (conv, params) => {
 
 exports.sayNumber = functions.https.onRequest(app);
 
+exports.getLastMonthExpense  = functions.https.onRequest(async (request ,response) =>{
+  const email = request.query.email;
+  const startDate = DateTime.utc().startOf('month').toISO();
+  const endDate = DateTime.utc().endOf('month').toISO();
+  const dbResults = await db.collection("Expenses").doc(email).collection("Expense").where("date", ">=", new Date(startDate)).where("date", "<=", new Date(endDate)).get();
+  let results = [];
+  dbResults.forEach((doc) => {
+    results.push(doc.data())
+  })
+  const output =
+  _(results)
+    .groupBy('category')
+    .map((objs, key) => ({
+        'category': key,
+        'amount': _.sumBy(objs, function(o) { return parseInt(o.amount); } )}))
+    .value();
+    return cors(request, response, () => {
+      response.status(200).send(output);
+    });
+});
